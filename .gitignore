@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Database
+inventory.db
+
+# Environment files
+.env
+
+# Build files
+/frontend/build
+
+# OS files
+.DS_Store
+Thumbs.db
