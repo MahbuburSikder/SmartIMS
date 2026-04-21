@@ -1,13 +1,18 @@
 const express = require("express");
 const cors = require("cors");
 const Database = require("better-sqlite3");
+const path = require("path");
 
 const app = express();
 
-app.use(cors());
+// ✅ Allow requests from anywhere (needed for deployment)
+app.use(cors({
+  origin: "*"
+}));
 app.use(express.json());
 
-const db = new Database("inventory.db");
+// ✅ Database stored in a fixed path
+const db = new Database(path.join(__dirname, "inventory.db"));
 
 // Create items table
 db.exec(`
@@ -29,7 +34,7 @@ db.exec(`
   )
 `);
 
-// ✅ Create reorder requests table
+// Create reorder requests table
 db.exec(`
   CREATE TABLE IF NOT EXISTS reorder_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,11 +65,9 @@ app.post("/api/items", (req, res) => {
   const stmt = db.prepare("INSERT INTO items (name, quantity) VALUES (?, ?)");
   const result = stmt.run(name, quantity);
 
-  // Log the action
   db.prepare("INSERT INTO audit_log (username, action, item_name) VALUES (?, ?, ?)")
     .run(username || "unknown", "ADDED", name);
 
-  // ✅ Auto reorder if quantity is low
   if (parseInt(quantity) < 5) {
     const existing = db.prepare(
       "SELECT * FROM reorder_requests WHERE item_name = ? AND status = 'PENDING'"
@@ -90,8 +93,6 @@ app.delete("/api/items/:id", (req, res) => {
   if (item) {
     db.prepare("INSERT INTO audit_log (username, action, item_name) VALUES (?, ?, ?)")
       .run(username || "unknown", "DELETED", item.name);
-
-    // ✅ Remove any pending reorder for deleted item
     db.prepare(
       "DELETE FROM reorder_requests WHERE item_name = ? AND status = 'PENDING'"
     ).run(item.name);
@@ -112,7 +113,6 @@ app.put("/api/items/:id", (req, res) => {
     db.prepare("INSERT INTO audit_log (username, action, item_name) VALUES (?, ?, ?)")
       .run(username || "unknown", "UPDATED", item.name);
 
-    // ✅ Auto reorder if updated quantity is low
     if (parseInt(quantity) < 5) {
       const existing = db.prepare(
         "SELECT * FROM reorder_requests WHERE item_name = ? AND status = 'PENDING'"
@@ -123,7 +123,6 @@ app.put("/api/items/:id", (req, res) => {
         ).run(item.name, quantity);
       }
     } else {
-      // ✅ Remove reorder request if quantity is now OK
       db.prepare(
         "DELETE FROM reorder_requests WHERE item_name = ? AND status = 'PENDING'"
       ).run(item.name);
@@ -141,7 +140,7 @@ app.get("/api/audit", (req, res) => {
   res.json(logs);
 });
 
-// ✅ GET reorder requests
+// GET reorder requests
 app.get("/api/reorders", (req, res) => {
   const reorders = db.prepare(
     "SELECT * FROM reorder_requests ORDER BY created_at DESC"
@@ -149,7 +148,7 @@ app.get("/api/reorders", (req, res) => {
   res.json(reorders);
 });
 
-// ✅ Mark reorder as done
+// PUT mark reorder done
 app.put("/api/reorders/:id", (req, res) => {
   const id = parseInt(req.params.id);
   db.prepare(
@@ -180,7 +179,8 @@ app.post("/api/login", (req, res) => {
   }
 });
 
-const PORT = 5001;
+// ✅ Use environment port for deployment
+const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
+  console.log(`✅ Server running on port ${PORT}`);
 });
