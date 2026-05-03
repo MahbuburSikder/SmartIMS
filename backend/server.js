@@ -1,49 +1,52 @@
 const express = require("express");
 const cors = require("cors");
-const Database = require("better-sqlite3");
-const path = require("path");
+const { Pool } = require("pg");
 
 const app = express();
 
-// ✅ Allow requests from anywhere (needed for deployment)
-app.use(cors({
-  origin: "*"
-}));
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// ✅ Database stored in a fixed path
-const db = new Database(path.join(__dirname, "inventory.db"));
+// ✅ PostgreSQL connection
+const pool = new Pool({
+  connectionString: "postgresql://smartims_db_user:oBoVzAL1JVGwUU9hLXUrC9XbfnfwXqYV@dpg-d7ri3j3bc2fs738cn94g-a.oregon-postgres.render.com/smartims_db",
+  ssl: { rejectUnauthorized: false }
+});
 
-// Create items table
-db.exec(`
-  CREATE TABLE IF NOT EXISTS items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    quantity INTEGER NOT NULL
-  )
-`);
+// ✅ Create tables if they don't exist
+const initDB = async () => {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS items (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      quantity INTEGER NOT NULL
+    )
+  `);
 
-// Create audit log table
-db.exec(`
-  CREATE TABLE IF NOT EXISTS audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL,
-    action TEXT NOT NULL,
-    item_name TEXT NOT NULL,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id SERIAL PRIMARY KEY,
+      username TEXT NOT NULL,
+      action TEXT NOT NULL,
+      item_name TEXT NOT NULL,
+      timestamp TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
 
-// Create reorder requests table
-db.exec(`
-  CREATE TABLE IF NOT EXISTS reorder_requests (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    item_name TEXT NOT NULL,
-    current_quantity INTEGER NOT NULL,
-    status TEXT DEFAULT 'PENDING',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS reorder_requests (
+      id SERIAL PRIMARY KEY,
+      item_name TEXT NOT NULL,
+      current_quantity INTEGER NOT NULL,
+      status TEXT DEFAULT 'PENDING',
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  console.log("✅ Database tables ready");
+};
+
+initDB();
 
 // Test route
 app.get("/", (req, res) => {
@@ -51,110 +54,166 @@ app.get("/", (req, res) => {
 });
 
 // GET all items
-app.get("/api/items", (req, res) => {
-  const items = db.prepare("SELECT * FROM items").all();
-  res.json(items);
+app.get("/api/items", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM items ORDER BY id");
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 // POST new item
-app.post("/api/items", (req, res) => {
-  const { name, quantity, username } = req.body;
-  if (!name || !quantity) {
-    return res.status(400).json({ error: "Name and quantity required" });
-  }
-  const stmt = db.prepare("INSERT INTO items (name, quantity) VALUES (?, ?)");
-  const result = stmt.run(name, quantity);
-
-  db.prepare("INSERT INTO audit_log (username, action, item_name) VALUES (?, ?, ?)")
-    .run(username || "unknown", "ADDED", name);
-
-  if (parseInt(quantity) < 5) {
-    const existing = db.prepare(
-      "SELECT * FROM reorder_requests WHERE item_name = ? AND status = 'PENDING'"
-    ).get(name);
-    if (!existing) {
-      db.prepare(
-        "INSERT INTO reorder_requests (item_name, current_quantity) VALUES (?, ?)"
-      ).run(name, quantity);
+app.post("/api/items", async (req, res) => {
+  try {
+    const { name, quantity, username } = req.body;
+    if (!name || !quantity) {
+      return res.status(400).json({ error: "Name and quantity required" });
     }
-  }
 
-  res.status(201).json({ id: result.lastInsertRowid, name, quantity });
+    const result = await pool.query(
+      "INSERT INTO items (name, quantity) VALUES ($1, $2) RETURNING *",
+      [name, quantity]
+    );
+
+    await pool.query(
+      "INSERT INTO audit_log (username, action, item_name) VALUES ($1, $2, $3)",
+      [username || "unknown", "ADDED", name]
+    );
+
+    if (parseInt(quantity) < 5) {
+      const existing = await pool.query(
+        "SELECT * FROM reorder_requests WHERE item_name = $1 AND status = 'PENDING'",
+        [name]
+      );
+      if (existing.rows.length === 0) {
+        await pool.query(
+          "INSERT INTO reorder_requests (item_name, current_quantity) VALUES ($1, $2)",
+          [name, quantity]
+        );
+      }
+    }
+
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 // DELETE item
-app.delete("/api/items/:id", (req, res) => {
-  const id = parseInt(req.params.id);
-  const { username } = req.body;
+app.delete("/api/items/:id", async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { username } = req.body;
 
-  const item = db.prepare("SELECT * FROM items WHERE id = ?").get(id);
-  db.prepare("DELETE FROM items WHERE id = ?").run(id);
+    const item = await pool.query("SELECT * FROM items WHERE id = $1", [id]);
 
-  if (item) {
-    db.prepare("INSERT INTO audit_log (username, action, item_name) VALUES (?, ?, ?)")
-      .run(username || "unknown", "DELETED", item.name);
-    db.prepare(
-      "DELETE FROM reorder_requests WHERE item_name = ? AND status = 'PENDING'"
-    ).run(item.name);
+    await pool.query("DELETE FROM items WHERE id = $1", [id]);
+
+    if (item.rows.length > 0) {
+      await pool.query(
+        "INSERT INTO audit_log (username, action, item_name) VALUES ($1, $2, $3)",
+        [username || "unknown", "DELETED", item.rows[0].name]
+      );
+      await pool.query(
+        "DELETE FROM reorder_requests WHERE item_name = $1 AND status = 'PENDING'",
+        [item.rows[0].name]
+      );
+    }
+
+    res.json({ message: "Item deleted" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
   }
-
-  res.json({ message: "Item deleted" });
 });
 
 // PUT update item
-app.put("/api/items/:id", (req, res) => {
-  const id = parseInt(req.params.id);
-  const { quantity, username } = req.body;
+app.put("/api/items/:id", async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { quantity, username } = req.body;
 
-  const item = db.prepare("SELECT * FROM items WHERE id = ?").get(id);
-  db.prepare("UPDATE items SET quantity = ? WHERE id = ?").run(quantity, id);
+    const item = await pool.query("SELECT * FROM items WHERE id = $1", [id]);
 
-  if (item) {
-    db.prepare("INSERT INTO audit_log (username, action, item_name) VALUES (?, ?, ?)")
-      .run(username || "unknown", "UPDATED", item.name);
+    await pool.query(
+      "UPDATE items SET quantity = $1 WHERE id = $2",
+      [quantity, id]
+    );
 
-    if (parseInt(quantity) < 5) {
-      const existing = db.prepare(
-        "SELECT * FROM reorder_requests WHERE item_name = ? AND status = 'PENDING'"
-      ).get(item.name);
-      if (!existing) {
-        db.prepare(
-          "INSERT INTO reorder_requests (item_name, current_quantity) VALUES (?, ?)"
-        ).run(item.name, quantity);
+    if (item.rows.length > 0) {
+      await pool.query(
+        "INSERT INTO audit_log (username, action, item_name) VALUES ($1, $2, $3)",
+        [username || "unknown", "UPDATED", item.rows[0].name]
+      );
+
+      if (parseInt(quantity) < 5) {
+        const existing = await pool.query(
+          "SELECT * FROM reorder_requests WHERE item_name = $1 AND status = 'PENDING'",
+          [item.rows[0].name]
+        );
+        if (existing.rows.length === 0) {
+          await pool.query(
+            "INSERT INTO reorder_requests (item_name, current_quantity) VALUES ($1, $2)",
+            [item.rows[0].name, quantity]
+          );
+        }
+      } else {
+        await pool.query(
+          "DELETE FROM reorder_requests WHERE item_name = $1 AND status = 'PENDING'",
+          [item.rows[0].name]
+        );
       }
-    } else {
-      db.prepare(
-        "DELETE FROM reorder_requests WHERE item_name = ? AND status = 'PENDING'"
-      ).run(item.name);
     }
-  }
 
-  res.json({ message: "Item updated" });
+    res.json({ message: "Item updated" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 // GET audit log
-app.get("/api/audit", (req, res) => {
-  const logs = db.prepare(
-    "SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT 50"
-  ).all();
-  res.json(logs);
+app.get("/api/audit", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT 50"
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 // GET reorder requests
-app.get("/api/reorders", (req, res) => {
-  const reorders = db.prepare(
-    "SELECT * FROM reorder_requests ORDER BY created_at DESC"
-  ).all();
-  res.json(reorders);
+app.get("/api/reorders", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM reorder_requests ORDER BY created_at DESC"
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 // PUT mark reorder done
-app.put("/api/reorders/:id", (req, res) => {
-  const id = parseInt(req.params.id);
-  db.prepare(
-    "UPDATE reorder_requests SET status = 'REORDERED' WHERE id = ?"
-  ).run(id);
-  res.json({ message: "Reorder marked as done" });
+app.put("/api/reorders/:id", async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    await pool.query(
+      "UPDATE reorder_requests SET status = 'REORDERED' WHERE id = $1",
+      [id]
+    );
+    res.json({ message: "Reorder marked as done" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 // LOGIN route
@@ -179,7 +238,6 @@ app.post("/api/login", (req, res) => {
   }
 });
 
-// ✅ Use environment port for deployment
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
