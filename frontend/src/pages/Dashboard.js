@@ -22,6 +22,19 @@ function Dashboard() {
 
   const LOW_STOCK_THRESHOLD = 5;
 
+  // ✅ Fixed timestamp for PostgreSQL
+  const formatTimestamp = (timestamp) => {
+    if (!timestamp) return "N/A";
+    const date = new Date(timestamp);
+    if (isNaN(date.getTime())) return "Invalid date";
+    return date.toLocaleString('en-AU', {
+      timeZone: 'Australia/Sydney',
+      day: '2-digit', month: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: true
+    });
+  };
+
   const fetchItems = useCallback(() => {
     fetch(`${API}/api/items`)
       .then((res) => res.json())
@@ -139,15 +152,6 @@ function Dashboard() {
     localStorage.removeItem("userRole");
     localStorage.removeItem("username");
     navigate("/");
-  };
-
-  const formatTimestamp = (timestamp) => {
-    return new Date(timestamp + 'Z').toLocaleString('en-AU', {
-      timeZone: 'Australia/Sydney',
-      day: '2-digit', month: '2-digit', year: 'numeric',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-      hour12: true
-    });
   };
 
   const lowStockItems = items.filter(
@@ -585,6 +589,7 @@ function Dashboard() {
                       </td>
                       <td style={{ padding: "10px", textAlign: "center",
                         fontSize: "13px", color: "#666" }}>
+                        {/* ✅ Fixed timestamp */}
                         {formatTimestamp(r.created_at)}
                       </td>
                       <td style={{ padding: "10px", textAlign: "center" }}>
@@ -655,6 +660,7 @@ function Dashboard() {
                       </td>
                       <td style={{ padding: "10px", textAlign: "center",
                         fontSize: "13px", color: "#666" }}>
+                        {/* ✅ Fixed timestamp */}
                         {formatTimestamp(log.timestamp)}
                       </td>
                     </tr>
